@@ -103,7 +103,6 @@ def get_model_by_alias(experiment_name, alias, spark):
         print(traceback.format_exc())
         return None, None, None
 
-
 def perform_ab_testing(spark, test_df, champion_model, challenger_model,
                        experiment_name, traffic_split=0.5, test_name="ab_test"):
     print(f"DEBUG: A/B testing with traffic split: {traffic_split}")
