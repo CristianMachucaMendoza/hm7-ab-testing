@@ -199,169 +199,68 @@ def save_model(model, output_path):
         print(f"Traceback: {traceback.format_exc()}")
         raise
 
-def get_best_model_metrics(experiment_name):
-    """
-    Получает метрики лучшей модели из MLflow с алиасом 'champion'
-    """
-    print(f"DEBUG: Получаем метрики лучшей модели для эксперимента '{experiment_name}'")
-    client = MlflowClient()
-
-    try:
-        print(f"DEBUG: Ищем эксперимент {experiment_name}")
-        experiment = client.get_experiment_by_name(experiment_name)
-        if not experiment:
-            print(f"Эксперимент '{experiment_name}' не найден")
-            return None
-        print(f"DEBUG: Эксперимент найден, ID: {experiment.experiment_id}")
-    except Exception as e:
-        print(f"ERROR: Ошибка при получении эксперимента: {str(e)}")
-        print(f"Traceback: {traceback.format_exc()}")
-        return None
-
-    try:
-        model_name = f"{experiment_name}_model"
-        print(f"DEBUG: Ищем зарегистрированную модель '{model_name}'")
-
-        try:
-            registered_model = client.get_registered_model(model_name)
-            print(f"Модель '{model_name}' зарегистрирована")
-            print(f"Модель '{model_name}' имеет {len(registered_model.latest_versions)} версий")
-        except Exception as e:
-            print(f"DEBUG: Модель '{model_name}' еще не зарегистрирована: {str(e)}")
-            return None
-
-        print("DEBUG: Получаем последние версии модели")
-        model_versions = client.get_latest_versions(model_name)
-        champion_version = None
-
-        print(f"DEBUG: Найдено {len(model_versions)} версий модели")
-        for version in model_versions:
-            print(f"DEBUG: Проверяем версию {version.version}")
-            if hasattr(version, 'aliases') and "champion" in version.aliases:
-                print(f"DEBUG: Найден 'champion' в aliases: {version.aliases}")
-                champion_version = version
-                break
-            elif hasattr(version, 'tags') and version.tags.get('alias') == "champion":
-                print(f"DEBUG: Найден 'champion' в тегах: {version.tags}")
-                champion_version = version
-                break
-            else:
-                print(f"DEBUG: Версия {version.version} не имеет алиаса 'champion'")
-
-        if not champion_version:
-            print("Модель с алиасом 'champion' не найдена")
-            return None
-
-        champion_run_id = champion_version.run_id
-        print(f"DEBUG: Run ID для 'champion': {champion_run_id}")
-
-        print(f"DEBUG: Получаем метрики для run_id: {champion_run_id}")
-        run = client.get_run(champion_run_id)
-        metrics = {
-            "run_id": champion_run_id,
-            "auc": run.data.metrics["auc"],
-            "accuracy": run.data.metrics["accuracy"],
-            "f1": run.data.metrics["f1"]
-        }
-
-        print(
-            f"Текущая лучшая модель (champion): "
-            f"версия {champion_version.version}, Run ID: {champion_run_id}"
-        )
-        print(
-            f"Метрики: AUC={metrics['auc']:.4f}, "
-            f"Accuracy={metrics['accuracy']:.4f}, "
-            f"F1={metrics['f1']:.4f}"
-        )
-
-        return metrics
-    except Exception as e:
-        print(f"ERROR: Ошибка при получении лучшей модели: {str(e)}")
-        print(f"Traceback: {traceback.format_exc()}")
-        return None
-
 def compare_and_register_model(new_metrics, experiment_name):
     """
-    Сравнивает новую модель с лучшей в MLflow и регистрирует, если она лучше
+    Register model as challenger always.
+    Only register as champion if no existing champion.
     """
-    print(f"DEBUG: Сравниваем и регистрируем модель для эксперимента {experiment_name}")
+    print(f"DEBUG: Registering model for experiment {experiment_name} as challenger")
     client = MlflowClient()
-
-    print("DEBUG: Получаем метрики лучшей модели")
-    best_metrics = get_best_model_metrics(experiment_name)
-
     model_name = f"{experiment_name}_model"
-    print(f"DEBUG: Имя модели: {model_name}")
-
+    # Check if model exists, create if not
     try:
-        print(f"DEBUG: Проверяем существует ли модель {model_name}")
         client.get_registered_model(model_name)
-        print(f"Модель '{model_name}' уже зарегистрирована")
+        print(f"Model '{model_name}' already registered")
     except Exception as e:
-        print(f"DEBUG: Создаем новую модель: {str(e)}")
+        print(f"DEBUG: Creating new registered model: {str(e)}")
         client.create_registered_model(model_name)
-        print(f"Создана новая регистрированная модель '{model_name}'")
+        print(f"Created new registered model '{model_name}'")
+
+    model_versions = client.get_latest_versions(model_name)
+    champion_exists = False
+    for version in model_versions:
+        if hasattr(version, 'aliases') and "champion" in version.aliases:
+            champion_exists = True
+            break
+        elif hasattr(version, 'tags') and version.tags.get('alias') == "champion":
+            champion_exists = True
+            break
 
     run_id = new_metrics["run_id"]
     model_uri = f"runs:/{run_id}/model"
-    print(f"DEBUG: Регистрируем модель из {model_uri}")
+    print(f"DEBUG: Registering model from {model_uri}")
     model_details = mlflow.register_model(model_uri, model_name)
     new_version = model_details.version
-    print(f"DEBUG: Зарегистрирована новая версия: {new_version}")
+    print(f"DEBUG: Registered new version: {new_version}")
 
-    should_promote = False
-
-    if not best_metrics:
-        should_promote = True
-        print("Это первая регистрируемая модель, она будет назначена как 'champion'")
-    else:
-        print(f"DEBUG: Сравниваем метрики - текущий AUC: {best_metrics['auc']}, новый AUC: {new_metrics['auc']}")
-        if new_metrics["auc"] > best_metrics["auc"]:
-            should_promote = True
-            improvement = (new_metrics["auc"] - best_metrics["auc"]) / best_metrics["auc"] * 100
-            print(
-                f"Новая модель лучше на {improvement:.2f}% по AUC. Установка в качестве 'champion'"
-            )
-        else:
-            print(
-                f"Новая модель не превосходит текущую 'champion' модель по AUC. "
-                f"Текущий AUC: {best_metrics['auc']:.4f}, новый AUC: {new_metrics['auc']:.4f}"
-            )
-
-    if should_promote:
-        try:
-            print("DEBUG: Пытаемся установить алиас 'champion'")
-            if hasattr(client, 'set_registered_model_alias'):
-                print("DEBUG: Используем set_registered_model_alias")
-                client.set_registered_model_alias(model_name, "champion", new_version)
-            else:
-                print("DEBUG: Используем set_model_version_tag")
-                client.set_model_version_tag(model_name, new_version, "alias", "champion")
-        except Exception as e:
-            print(f"ERROR: Ошибка установки алиаса 'champion': {str(e)}")
-            print(f"Traceback: {traceback.format_exc()}")
-            print("DEBUG: Используем set_model_version_tag (запасной вариант)")
-            client.set_model_version_tag(model_name, new_version, "alias", "champion")
-
-        print(f"Версия {new_version} модели '{model_name}' установлена как 'champion'")
-        return True
-
+    # Always set challenger alias
     try:
-        print("DEBUG: Пытаемся установить алиас 'challenger'")
         if hasattr(client, 'set_registered_model_alias'):
-            print("DEBUG: Используем set_registered_model_alias")
             client.set_registered_model_alias(model_name, "challenger", new_version)
         else:
-            print("DEBUG: Используем set_model_version_tag")
             client.set_model_version_tag(model_name, new_version, "alias", "challenger")
     except Exception as e:
-        print(f"ERROR: Ошибка установки алиаса 'challenger': {str(e)}")
+        print(f"ERROR: Failed setting challenger alias: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
-        print("DEBUG: Используем set_model_version_tag (запасной вариант)")
+        # fallback
         client.set_model_version_tag(model_name, new_version, "alias", "challenger")
 
-    print(f"Версия {new_version} модели '{model_name}' установлена как 'challenger'")
-    return False
+    print(f"Version {new_version} of model '{model_name}' set as 'challenger'")
+
+    # If no champion, also set champion alias once
+    if not champion_exists:
+        try:
+            if hasattr(client, 'set_registered_model_alias'):
+                client.set_registered_model_alias(model_name, "champion", new_version)
+            else:
+                client.set_model_version_tag(model_name, new_version, "alias", "champion")
+            print(f"Version {new_version} also set as 'champion' because no champion existed before")
+        except Exception as e:
+            print(f"ERROR: Failed setting champion alias: {str(e)}")
+            print(f"Traceback: {traceback.format_exc()}")
+
+    return True
+
 
 def main():
     """Main function to run the fraud detection model training."""
