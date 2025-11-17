@@ -45,7 +45,7 @@ https://github.com/CristianMachucaMendoza/hm7-ab-testing/blob/main/src/ab_test.p
 https://github.com/CristianMachucaMendoza/hm7-ab-testing/blob/main/dags/train_ab_test.py
 
 5. **Обеспечить сохранение метрик модели и артефактов** (обученной модели) в S3 хранилище (Object storage).
-https://github.com/CristianMachucaMendoza/hm7-ab-testing/blob/main/src/ab_test.py
+![alt text](docs/bucket.png)
 
 6. **Разрешить периодическое исполнение разработанного DAG** в Apache AirFlow и протестировать его работоспособность.
 ![alt text](docs/airflow.png)
