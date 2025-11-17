@@ -40,7 +40,7 @@
 3. **Выбрать стратегию для валидации модели** Создать код для проведения А/В теста и оценить метрики модели на выбранной стратегии.
 https://github.com/CristianMachucaMendoza/hm7-ab-testing/blob/main/src/ab_test.py
 ![alt text](docs/validation.png)
-
+![alt text](docs/ab_test.png)
 
 4. **Добавить в AirFlow шаг** по валидации модели и фиксации метрик в MLFlow.
 https://github.com/CristianMachucaMendoza/hm7-ab-testing/blob/main/dags/train_ab_test.py
@@ -50,4 +50,4 @@ https://github.com/CristianMachucaMendoza/hm7-ab-testing/blob/main/dags/train_ab
 ![alt text](docs/bucket.png)
 
 6. **Разрешить периодическое исполнение разработанного DAG** в Apache AirFlow и протестировать его работоспособность.
-![alt text](docs/airflow.png)
+![alt text](docs/airflow2.png)
