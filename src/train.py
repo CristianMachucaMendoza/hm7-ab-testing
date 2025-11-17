@@ -1,6 +1,5 @@
-"""
-Script: fraud_detection_model.py
-Description: PySpark script for training a fraud detection model with A/B testing capabilities.
+""""
+Description: PySpark script for training a fraud detection model.
 """
 
 import os
@@ -16,7 +15,7 @@ from pyspark.ml.feature import VectorAssembler, StandardScaler
 from pyspark.ml.classification import RandomForestClassifier
 from pyspark.ml.evaluation import BinaryClassificationEvaluator, MulticlassClassificationEvaluator
 from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
-from pyspark.sql.functions import col, lit, rand, when
+from pyspark.sql.functions import col
 import time
 from datetime import datetime
 
@@ -97,208 +96,10 @@ def prepare_features(train_df, test_df):
         print(f"Traceback: {traceback.format_exc()}")
         raise
 
-def load_champion_model(spark, experiment_name):
-    """
-    Load the champion model from MLflow.
-    
-    Parameters
-    ----------
-    spark : SparkSession
-        Spark session
-    experiment_name : str
-        Name of the MLflow experiment
-        
-    Returns
-    -------
-    PipelineModel or None
-        Loaded champion model or None if not found
-    """
-    print(f"DEBUG: Загружаем champion модель для эксперимента {experiment_name}")
-    client = MlflowClient()
-    
-    try:
-        # Get the champion model
-        champion_metrics = get_best_model_metrics(experiment_name)
-        if not champion_metrics:
-            print("DEBUG: Champion модель не найдена")
-            return None
-            
-        champion_run_id = champion_metrics["run_id"]
-        print(f"DEBUG: Загружаем модель из run_id: {champion_run_id}")
-        
-        # Load the model from MLflow
-        model_uri = f"runs:/{champion_run_id}/model"
-        champion_model = mlflow.spark.load_model(model_uri, spark_session=spark)
-        
-        print("DEBUG: Champion модель успешно загружена")
-        return champion_model
-        
-    except Exception as e:
-        print(f"ERROR: Ошибка загрузки champion модели: {str(e)}")
-        print(f"Traceback: {traceback.format_exc()}")
-        return None
-
-def perform_ab_testing(spark, test_df, champion_model, challenger_model, experiment_name, traffic_split=0.5):
-    """
-    Perform A/B testing between champion and challenger models.
-    
-    Parameters
-    ----------
-    spark : SparkSession
-        Spark session
-    test_df : DataFrame
-        Test data for A/B testing
-    champion_model : PipelineModel
-        Current champion model
-    challenger_model : PipelineModel
-        New challenger model
-    experiment_name : str
-        MLflow experiment name
-    traffic_split : float
-        Percentage of traffic for challenger model (0.0 to 1.0)
-        
-    Returns
-    -------
-    dict
-        A/B test results
-    """
-    print(f"DEBUG: Начинаем A/B тестирование с распределением трафика: {traffic_split}")
-    
-    try:
-        # Add random split for A/B testing
-        ab_test_df = test_df.withColumn("ab_group", 
-            when(rand() < traffic_split, "challenger").otherwise("champion"))
-        
-        # Get counts for each group
-        group_counts = ab_test_df.groupBy("ab_group").count().collect()
-        champion_count = next((row['count'] for row in group_counts if row['ab_group'] == 'champion'), 0)
-        challenger_count = next((row['count'] for row in group_counts if row['ab_group'] == 'challenger'), 0)
-        
-        print(f"DEBUG: A/B группы - Champion: {champion_count}, Challenger: {challenger_count}")
-        
-        # Split data for each model
-        champion_test_df = ab_test_df.filter(col("ab_group") == "champion")
-        challenger_test_df = ab_test_df.filter(col("ab_group") == "challenger")
-        
-        # Make predictions with both models
-        print("DEBUG: Делаем предсказания для champion модели")
-        champion_predictions = champion_model.transform(champion_test_df)
-        
-        print("DEBUG: Делаем предсказания для challenger модели")
-        challenger_predictions = challenger_model.transform(challenger_test_df)
-        
-        # Calculate metrics for both models
-        evaluator_auc = BinaryClassificationEvaluator(
-            labelCol="tx_fraud", rawPredictionCol="rawPrediction", metricName="areaUnderROC"
-        )
-        evaluator_acc = MulticlassClassificationEvaluator(
-            labelCol="tx_fraud", predictionCol="prediction", metricName="accuracy"
-        )
-        evaluator_f1 = MulticlassClassificationEvaluator(
-            labelCol="tx_fraud", predictionCol="prediction", metricName="f1"
-        )
-        
-        # Champion metrics
-        champion_auc = evaluator_auc.evaluate(champion_predictions)
-        champion_accuracy = evaluator_acc.evaluate(champion_predictions)
-        champion_f1 = evaluator_f1.evaluate(champion_predictions)
-        
-        # Challenger metrics
-        challenger_auc = evaluator_auc.evaluate(challenger_predictions)
-        challenger_accuracy = evaluator_acc.evaluate(challenger_predictions)
-        challenger_f1 = evaluator_f1.evaluate(challenger_predictions)
-        
-        # Calculate improvement
-        auc_improvement = challenger_auc - champion_auc
-        accuracy_improvement = challenger_accuracy - champion_accuracy
-        f1_improvement = challenger_f1 - champion_f1
-        
-        # Determine winner
-        if auc_improvement > 0:
-            winner = "challenger"
-            improvement_msg = f"Challenger модель лучше на {auc_improvement:.4f} по AUC"
-        else:
-            winner = "champion"
-            improvement_msg = f"Champion модель лучше на {-auc_improvement:.4f} по AUC"
-        
-        # Prepare results
-        ab_results = {
-            "timestamp": datetime.now().isoformat(),
-            "traffic_split": traffic_split,
-            "champion_metrics": {
-                "auc": champion_auc,
-                "accuracy": champion_accuracy,
-                "f1": champion_f1,
-                "sample_size": champion_count
-            },
-            "challenger_metrics": {
-                "auc": challenger_auc,
-                "accuracy": challenger_accuracy,
-                "f1": challenger_f1,
-                "sample_size": challenger_count
-            },
-            "improvements": {
-                "auc": auc_improvement,
-                "accuracy": accuracy_improvement,
-                "f1": f1_improvement
-            },
-            "winner": winner,
-            "improvement_message": improvement_msg
-        }
-        
-        # Log A/B test results to MLflow
-        with mlflow.start_run(run_name=f"ab_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}") as ab_run:
-            # Log parameters
-            mlflow.log_param("ab_traffic_split", traffic_split)
-            mlflow.log_param("ab_test_timestamp", ab_results["timestamp"])
-            
-            # Log champion metrics
-            mlflow.log_metric("champion_auc", champion_auc)
-            mlflow.log_metric("champion_accuracy", champion_accuracy)
-            mlflow.log_metric("champion_f1", champion_f1)
-            mlflow.log_metric("champion_sample_size", champion_count)
-            
-            # Log challenger metrics
-            mlflow.log_metric("challenger_auc", challenger_auc)
-            mlflow.log_metric("challenger_accuracy", challenger_accuracy)
-            mlflow.log_metric("challenger_f1", challenger_f1)
-            mlflow.log_metric("challenger_sample_size", challenger_count)
-            
-            # Log improvements
-            mlflow.log_metric("auc_improvement", auc_improvement)
-            mlflow.log_metric("accuracy_improvement", accuracy_improvement)
-            mlflow.log_metric("f1_improvement", f1_improvement)
-            
-            # Log winner
-            mlflow.log_param("winner", winner)
-            mlflow.log_param("improvement_message", improvement_msg)
-            
-            # Log as artifact
-            import json
-            ab_results_str = json.dumps(ab_results, indent=2)
-            mlflow.log_text(ab_results_str, "ab_test_results.json")
-        
-        print("=== A/B TEST RESULTS ===")
-        print(f"Champion - AUC: {champion_auc:.4f}, Accuracy: {champion_accuracy:.4f}, F1: {champion_f1:.4f}")
-        print(f"Challenger - AUC: {challenger_auc:.4f}, Accuracy: {challenger_accuracy:.4f}, F1: {challenger_f1:.4f}")
-        print(f"Improvement - AUC: {auc_improvement:.4f}, Accuracy: {accuracy_improvement:.4f}, F1: {f1_improvement:.4f}")
-        print(f"WINNER: {winner.upper()}")
-        print(f"Message: {improvement_msg}")
-        print("========================")
-        
-        return ab_results
-        
-    except Exception as e:
-        print(f"ERROR: Ошибка при A/B тестировании: {str(e)}")
-        print(f"Traceback: {traceback.format_exc()}")
-        raise
-
 def train_model(train_df, test_df, feature_cols, model_type="rf", run_name="fraud_detection_model"):
     """Train a fraud detection model and log metrics to MLflow."""
-    print(f"DEBUG: Начинаем обучение модели типа {model_type}, run_name: {run_name}")
+    print(f"DEBUG: Starting training model type {model_type}, run_name: {run_name}")
     try:
-        # Create feature vector
-        print("DEBUG: Создание преобразователя признаков")
         assembler = VectorAssembler(inputCols=feature_cols, outputCol="features_raw")
         scaler = StandardScaler(
             inputCol="features_raw",
@@ -307,27 +108,15 @@ def train_model(train_df, test_df, feature_cols, model_type="rf", run_name="frau
             withMean=True
         )
 
-        # Select model based on type
-        print("DEBUG: Создание классификатора")
         classifier = RandomForestClassifier(
             labelCol="tx_fraud",
             featuresCol="features",
             numTrees=10,
             maxDepth=5
         )
-        param_grid = (ParamGridBuilder()
-            .addGrid(classifier.numTrees, [10, 20])
-            .addGrid(classifier.maxDepth, [5, 10])
-            .build()
-        )
-        print(f"DEBUG: Сконфигурирована сетка параметров с {len(param_grid)} комбинациями")
 
-        # Create pipeline
-        print("DEBUG: Создание пайплайна")
         pipeline = Pipeline(stages=[assembler, scaler, classifier])
 
-        # Create evaluators
-        print("DEBUG: Создание оценщиков")
         evaluator_auc = BinaryClassificationEvaluator(
             labelCol="tx_fraud",
             rawPredictionCol="rawPrediction",
@@ -344,53 +133,31 @@ def train_model(train_df, test_df, feature_cols, model_type="rf", run_name="frau
             metricName="f1"
         )
 
-        # Create cross-validator
-        print("DEBUG: Создание кросс-валидатора")
-        cv = CrossValidator(
-            estimator=pipeline,
-            estimatorParamMaps=param_grid,
-            evaluator=evaluator_auc,
-            numFolds=3
-        )
-
-        # Start MLflow run
-        print(f"DEBUG: Начинаем MLflow run: {run_name}")
+        print(f"DEBUG: Starting MLflow run: {run_name}")
         with mlflow.start_run(run_name=run_name) as run:
             run_id = run.info.run_id
             print(f"MLflow Run ID: {run_id}")
 
-            # Log model parameters
-            print("DEBUG: Логируем параметры в MLflow")
-            mlflow.log_param("numTrees_options", [10, 20])
-            mlflow.log_param("maxDepth_options", [5, 10])
+            mlflow.log_param("numTrees", 10)
+            mlflow.log_param("maxDepth", 5)
 
-            # Train the model
-            print("DEBUG: Обучаем модель...")
-            cv_model = cv.fit(train_df)
-            print("DEBUG: Модель успешно обучена")
-            best_model = cv_model.bestModel
-            print("DEBUG: Получили лучшую модель")
+            print("DEBUG: Training the model...")
+            model = pipeline.fit(train_df)
+            print("DEBUG: Model trained successfully")
 
-            # Make predictions on test data
-            print("DEBUG: Делаем предсказания на тестовых данных")
-            predictions = best_model.transform(test_df)
-            print("DEBUG: Предсказания получены")
+            predictions = model.transform(test_df)
+            print("DEBUG: Predictions done")
 
-            # Calculate metrics
-            print("DEBUG: Рассчитываем метрики")
             auc = evaluator_auc.evaluate(predictions)
             accuracy = evaluator_acc.evaluate(predictions)
             f1 = evaluator_f1.evaluate(predictions)
 
-            # Log metrics
-            print("DEBUG: Логируем метрики в MLflow")
+            print("DEBUG: Logging metrics to MLflow")
             mlflow.log_metric("auc", auc)
             mlflow.log_metric("accuracy", accuracy)
             mlflow.log_metric("f1", f1)
 
-            # Log best model parameters
-            print("DEBUG: Получаем и логируем параметры лучшей модели")
-            rf_model = best_model.stages[-1]
+            rf_model = model.stages[-1]
             try:
                 num_trees = rf_model.getNumTrees
                 max_depth = rf_model.getMaxDepth()
@@ -398,13 +165,11 @@ def train_model(train_df, test_df, feature_cols, model_type="rf", run_name="frau
                 mlflow.log_param("best_numTrees", num_trees)
                 mlflow.log_param("best_maxDepth", max_depth)
             except Exception as e:
-                print(f"WARNING: Ошибка при получении параметров модели: {str(e)}")
+                print(f"WARNING: Error getting model params: {str(e)}")
 
-            # Log the model
-            print("DEBUG: Сохраняем модель в MLflow")
-            mlflow.spark.log_model(best_model, "model")
+            print("DEBUG: Logging the model to MLflow")
+            mlflow.spark.log_model(model, "model")
 
-            # Print metrics
             print(f"AUC: {auc}")
             print(f"Accuracy: {accuracy}")
             print(f"F1 Score: {f1}")
@@ -416,9 +181,10 @@ def train_model(train_df, test_df, feature_cols, model_type="rf", run_name="frau
                 "f1": f1
             }
 
-            return best_model, metrics
+            return model, metrics
+
     except Exception as e:
-        print(f"ERROR: Ошибка обучения модели: {str(e)}")
+        print(f"ERROR: Error training model: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
         raise
 
@@ -598,9 +364,9 @@ def compare_and_register_model(new_metrics, experiment_name):
     return False
 
 def main():
-    """Main function to run the fraud detection model training with A/B testing."""
+    """Main function to run the fraud detection model training."""
     print("DEBUG: Скрипт запущен, начинаем инициализацию")
-    parser = argparse.ArgumentParser(description="Fraud Detection Model Training with A/B Testing")
+    parser = argparse.ArgumentParser(description="Fraud Detection Model Training")
     # Основные параметры
     parser.add_argument("--input", required=True, help="Input data path")
     parser.add_argument("--output", required=True, help="Output model path")
@@ -611,11 +377,6 @@ def main():
     parser.add_argument("--experiment-name", default="fraud_detection", help="MLflow exp name")
     parser.add_argument("--auto-register", action="store_true", help="Automatically register")
     parser.add_argument("--run-name", default=None, help="Name for the MLflow run")
-
-    # A/B testing parameters
-    parser.add_argument("--ab-testing", action="store_true", help="Enable A/B testing")
-    parser.add_argument("--ab-traffic-split", type=float, default=0.5, 
-                       help="Traffic split for challenger model (0.0 to 1.0)")
 
     # Отключение проверки Git для MLflow
     os.environ['GIT_PYTHON_REFRESH'] = 'quiet'
@@ -661,12 +422,6 @@ def main():
         print("DEBUG: Подготавливаем признаки")
         train_df, test_df, feature_cols = prepare_features(train_df, test_df)
 
-        # Load champion model if A/B testing is enabled
-        champion_model = None
-        if args.ab_testing:
-            print("DEBUG: A/B тестирование включено, загружаем champion модель")
-            champion_model = load_champion_model(spark, args.experiment_name)
-
         # Generate run name if not provided
         run_name = (
             args.run_name or f"fraud_detection_{args.model_type}_{os.path.basename(args.input)}"
@@ -681,35 +436,10 @@ def main():
         print("DEBUG: Сохраняем модель")
         save_model(model, args.output)
 
-        # Perform A/B testing if enabled and champion exists
-        if args.ab_testing and champion_model:
-            print("DEBUG: Выполняем A/B тестирование")
-            ab_results = perform_ab_testing(
-                spark=spark,
-                test_df=test_df,
-                champion_model=champion_model,
-                challenger_model=model,
-                experiment_name=args.experiment_name,
-                traffic_split=args.ab_traffic_split
-            )
-            
-            # Use A/B test results to decide whether to promote
-            if ab_results["winner"] == "challenger":
-                print("DEBUG: Challenger модель выиграла A/B тест, промотируем до champion")
-                if args.auto_register:
-                    print("DEBUG: Регистрируем модель как champion")
-                    compare_and_register_model(metrics, args.experiment_name)
-            else:
-                print("DEBUG: Champion модель остается лучшей, новая модель остается challenger")
-                if args.auto_register:
-                    # Still register but as challenger
-                    print("DEBUG: Регистрируем модель как challenger")
-                    compare_and_register_model(metrics, args.experiment_name)
-        else:
-            # Standard registration without A/B testing
-            if args.auto_register:
-                print("DEBUG: Сравниваем и регистрируем модель")
-                compare_and_register_model(metrics, args.experiment_name)
+        # Register model if enabled
+        if args.auto_register:
+            print("DEBUG: Сравниваем и регистрируем модель")
+            compare_and_register_model(metrics, args.experiment_name)
 
         print("Training completed successfully!")
 
